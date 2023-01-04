@@ -1,9 +1,8 @@
 ﻿using ApacheOrcDotNet.Protocol;
 using System;
+using IronSnappy;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace ApacheOrcDotNet.Compression
 {
@@ -39,6 +38,32 @@ namespace ApacheOrcDotNet.Compression
 			switch (compressionType)
 			{
 				case CompressionKind.Zlib: return new ZLibStream(inputStream);
+
+				case CompressionKind.Snappy:
+					//inputStream.SetLength(inputStream.Length - 4);
+					int count = 0;
+					int offset = 0;
+					List<byte> bytes = new List<byte>();
+					do
+                    {
+						byte[] buffer = new byte[1024];
+						count = inputStream.Read(buffer, offset, 1024);
+                        //offset += count;
+                        if (count == 1024)
+                        {
+                            bytes.AddRange(buffer); 
+                        }
+                        else
+                        {
+                            for (int i = 0; i < count; i++)
+                            {
+								bytes.Add(buffer[i]);
+                            }
+                        }
+                    } while (count > 0);
+					//bytes.RemoveRange(bytes.Count - 5, 4);
+					var decoded = Snappy.Decode(bytes.ToArray());
+					return new MemoryStream(decoded);
 				default:
 					throw new NotImplementedException($"Unimplemented {nameof(CompressionType)} {compressionType}");
 			}

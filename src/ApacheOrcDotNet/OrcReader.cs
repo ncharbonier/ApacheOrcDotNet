@@ -1,4 +1,7 @@
-﻿using System;
+﻿using ApacheOrcDotNet.ColumnTypes;
+using ApacheOrcDotNet.Protocol;
+using ApacheOrcDotNet.Stripes;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -15,7 +18,7 @@ namespace ApacheOrcDotNet
         readonly FileTail _fileTail;
         readonly bool _ignoreMissingColumns;
 
-        public OrcReader(Type type, Stream inputStream, bool ignoreMissingColumns = false)
+        public OrcReader(Type type, System.IO.Stream inputStream, bool ignoreMissingColumns = false)
         {
             _type = type;
             _ignoreMissingColumns = ignoreMissingColumns;
@@ -46,20 +49,54 @@ namespace ApacheOrcDotNet
             }
         }
 
-        IEnumerable<(PropertyInfo propertyInfo, uint columnId, Protocol.ColumnTypeKind columnType)> FindColumnsForType(Type type, Protocol.Footer footer)
+        IEnumerable<object> ReadSubType(Type type, uint columnId)
+        {
+            var properties = FindColumnsForType(type, _fileTail.Footer, (int)columnId).ToList();
+
+            foreach (var stripe in _fileTail.Stripes)
+            {
+                var stripeStreams = stripe.GetStripeStreamCollection();
+
+                var present = new ColumnReader(stripeStreams, columnId).ReadBooleanStream(StreamKind.Present);
+
+                var readAndSetters = properties.Select(p => GetReadAndSetterForColumn(p.propertyInfo, stripeStreams, p.columnId, p.columnType)).ToList();
+
+                for (ulong i = 0; i < stripe.NumRows; i++)
+                {
+                    if (present[i])
+                    {
+                        var obj = Activator.CreateInstance(type);
+                        foreach (var readAndSetter in readAndSetters)
+                        {
+                            readAndSetter(obj);
+                        }
+                        yield return obj; 
+                    }
+                    else
+                    {
+                        yield return null;
+                    }   
+                }
+            }
+        }
+
+        IEnumerable<(PropertyInfo propertyInfo, uint columnId, ColumnTypeKind columnType)> FindColumnsForType(Type type, 
+            Footer footer, int parentColumnId = 0)
         {
             foreach (var property in GetWritablePublicProperties(type))
             {
-                var columnId = footer.Types[0].FieldNames.FindIndex(fn => fn.ToLower() == property.Name.ToLower()) + 1;
-                if (columnId == 0)
+                var columnIdIndex = footer.Types[parentColumnId].FieldNames
+                    .FindIndex(fn => fn.ToLower().TrimStart('_') == property.Name.ToLower());
+                if (columnIdIndex < 0)
                 {
                     if (_ignoreMissingColumns)
                         continue;
                     else
                         throw new KeyNotFoundException($"'{property.Name}' not found in ORC data");
                 }
-                var columnType = footer.Types[columnId].Kind;
-                yield return (property, (uint)columnId, columnType);
+                var columnId = footer.Types[parentColumnId].SubTypes[columnIdIndex];
+                var columnType = footer.Types[(int)columnId].Kind;
+                yield return (property, columnId, columnType);
             }
         }
 
@@ -68,32 +105,43 @@ namespace ApacheOrcDotNet
             return type.GetTypeInfo().DeclaredProperties.Where(p => p.SetMethod != null);
         }
 
-        Action<object> GetReadAndSetterForColumn(PropertyInfo propertyInfo, Stripes.StripeStreamReaderCollection stripeStreams, uint columnId, Protocol.ColumnTypeKind columnType)
+        Action<object> GetReadAndSetterForColumn(PropertyInfo propertyInfo, StripeStreamReaderCollection stripeStreams, uint columnId, ColumnTypeKind columnType)
         {
             switch (columnType)
             {
-                case Protocol.ColumnTypeKind.Long:
-                case Protocol.ColumnTypeKind.Int:
-                case Protocol.ColumnTypeKind.Short:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.LongReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Byte:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.ByteReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Boolean:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.BooleanReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Float:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.FloatReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Double:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.DoubleReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Binary:
+                case ColumnTypeKind.Long:
+                case ColumnTypeKind.Int:
+                case ColumnTypeKind.Short:
+                    return GetValueSetterEnumerable(propertyInfo, new LongReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Byte:
+                    return GetValueSetterEnumerable(propertyInfo, new ByteReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Boolean:
+                    return GetValueSetterEnumerable(propertyInfo, new BooleanReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Float:
+                    return GetValueSetterEnumerable(propertyInfo, new FloatReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Double:
+                    return GetValueSetterEnumerable(propertyInfo, new DoubleReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Binary:
                     return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.BinaryReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Decimal:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.DecimalReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Timestamp:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.TimestampReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.Date:
-                    return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.DateReader(stripeStreams, columnId).Read());
-                case Protocol.ColumnTypeKind.String:
+                case ColumnTypeKind.Decimal:
+                    return GetValueSetterEnumerable(propertyInfo, new DecimalReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Timestamp:
+                    return GetValueSetterEnumerable(propertyInfo, new TimestampReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Date:
+                    return GetValueSetterEnumerable(propertyInfo, new DateReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.String:
                     return GetValueSetterEnumerable(propertyInfo, new ColumnTypes.StringReader(stripeStreams, columnId).Read());
+                case ColumnTypeKind.Struct:
+                    Type type = propertyInfo.PropertyType;
+                    if (type.IsClass && !type.FullName.StartsWith("System."))
+                    {
+                        return GetValueSetterEnumerable(propertyInfo, ReadSubType(type, columnId));
+                    }
+                    else
+                    {
+                        return GetValueSetterEnumerable(propertyInfo, new StructReader(stripeStreams, columnId
+                                    , _fileTail.Footer.Types[(int)columnId].SubTypes.ToArray()).Read(type));
+                    }
                 default:
                     throw new NotImplementedException($"Column type {columnType} is not supported");
             }

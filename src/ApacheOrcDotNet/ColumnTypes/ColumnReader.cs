@@ -12,7 +12,7 @@ namespace ApacheOrcDotNet.ColumnTypes
 {
 	public class ColumnReader
 	{
-		readonly StripeStreamReaderCollection _stripeStreams;
+		protected readonly StripeStreamReaderCollection _stripeStreams;
 		readonly uint _columnId;
 
 		public ColumnReader(StripeStreamReaderCollection stripeStreams, uint columnId)
@@ -49,7 +49,7 @@ namespace ApacheOrcDotNet.ColumnTypes
 			return reader.Read().ToArray();
 		}
 
-		protected bool[] ReadBooleanStream(Protocol.StreamKind streamKind)
+		public bool[] ReadBooleanStream(Protocol.StreamKind streamKind)
 		{
 			var stripeStream = GetStripeStream(streamKind);
 			if (stripeStream == null)
