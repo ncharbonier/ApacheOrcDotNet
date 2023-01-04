@@ -22,61 +22,134 @@ namespace ApacheOrcDotNet.ColumnTypes
             var kind = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Data);
 
 
-            var present = ReadBooleanStream(Protocol.StreamKind.Present);
-            var stripeStreamData = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Data);
-            var stripeStreamLength = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Length);
-            if (stripeStreamData == null || stripeStreamLength == null)
-                throw new InvalidDataException("DATA or LENGTH streams must be available");
-
-
-            var stream = stripeStreamData.GetDecompressedStream();
-            var memStream = new MemoryStream();
-            stream.CopyTo(memStream);
-            var data = memStream.ToArray();
-
-            var streamLength = stripeStreamLength.GetDecompressedStream();
-            var reader = new IntegerRunLengthEncodingV2Reader(streamLength, false);
-            var length = reader.Read().ToArray();
-
-            int stringOffset = 0;
-            if (present == null)
+            if (kind?.ColumnEncodingKind == Protocol.ColumnEncodingKind.DirectV2)
             {
-                foreach (var len in length)
+                var present = ReadBooleanStream(Protocol.StreamKind.Present);
+                var stripeStreamData = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Data);
+                var stripeStreamLength = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Length);
+                if (stripeStreamData == null || stripeStreamLength == null)
+                    throw new InvalidDataException("DATA or LENGTH streams must be available");
+
+
+                var stream = stripeStreamData.GetDecompressedStream();
+                var memStream = new MemoryStream();
+                stream.CopyTo(memStream);
+                var data = memStream.ToArray();
+
+                var streamLength = stripeStreamLength.GetDecompressedStream();
+                var reader = new IntegerRunLengthEncodingV2Reader(streamLength, false);
+                var length = reader.Read().ToArray();
+
+                int stringOffset = 0;
+                if (present == null)
                 {
-                    var value = Encoding.UTF8.GetString(data, stringOffset, (int)len);
-                    stringOffset += (int)len;
-                    yield return CalculateValue(propertyType, value);
-                }
-            }
-            else
-            {
-                var lengthEnumerator = ((IEnumerable<long>)length).GetEnumerator();
-                foreach (var isPresent in present)
-                {
-                    if (isPresent)
+                    foreach (var len in length)
                     {
-                        var success = lengthEnumerator.MoveNext();
-                        if (!success)
-                            throw new InvalidDataException("The PRESENT data stream's length didn't match the LENGTH stream's length");
-                        var len = lengthEnumerator.Current;
                         var value = Encoding.UTF8.GetString(data, stringOffset, (int)len);
                         stringOffset += (int)len;
                         yield return CalculateValue(propertyType, value);
                     }
-                    else
-                        yield return null;
+                }
+                else
+                {
+                    var lengthEnumerator = ((IEnumerable<long>)length).GetEnumerator();
+                    foreach (var isPresent in present)
+                    {
+                        if (isPresent)
+                        {
+                            var success = lengthEnumerator.MoveNext();
+                            if (!success)
+                                throw new InvalidDataException("The PRESENT data stream's length didn't match the LENGTH stream's length");
+                            var len = lengthEnumerator.Current;
+                            var value = Encoding.UTF8.GetString(data, stringOffset, (int)len);
+                            stringOffset += (int)len;
+                            yield return CalculateValue(propertyType, value);
+                        }
+                        else
+                            yield return null;
+                    }
+                }
+
+                yield return null;
+            }
+            else
+            {
+                var present = ReadBooleanStream(Protocol.StreamKind.Present);
+
+                var stripeStreamData = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Data);
+                var stripeStreamLength = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Length);
+                var stripeStreamDictionary = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.DictionaryData);
+
+                var stream = stripeStreamData.GetDecompressedStream();
+                var reader = new IntegerRunLengthEncodingV2Reader(stream, false);
+                var data = reader.Read().ToArray();
+
+                var streamDictionary = stripeStreamDictionary.GetDecompressedStream();
+                var memStream = new MemoryStream();
+                streamDictionary.CopyTo(memStream);
+                var dictionaryData = memStream.ToArray();
+
+                var streamLength = stripeStreamLength.GetDecompressedStream();
+                var readerLength = new IntegerRunLengthEncodingV2Reader(streamLength, false);
+                var length = readerLength.Read().ToArray();
+
+                if (data == null || dictionaryData == null || length == null)
+                    throw new InvalidDataException("DATA, DICTIONARY_DATA, and LENGTH streams must be available");
+
+                var dictionary = new List<string>();
+                int stringOffset = 0;
+                foreach (var len in length)
+                {
+                    var dictionaryValue = Encoding.UTF8.GetString(dictionaryData, stringOffset, (int)len);
+                    stringOffset += (int)len;
+                    dictionary.Add(dictionaryValue);
+                }
+
+                if (present == null)
+                {
+                    foreach (var value in data)
+                        yield return CalculateValue(propertyType, dictionary[(int)value]);
+                }
+                else
+                {
+                    var valueEnumerator = ((IEnumerable<long>)data).GetEnumerator();
+                    foreach (var isPresent in present)
+                    {
+                        if (isPresent)
+                        {
+                            var success = valueEnumerator.MoveNext();
+                            if (!success)
+                                throw new InvalidDataException("The PRESENT data stream's length didn't match the DATA stream's length");
+                            yield return CalculateValue(propertyType, dictionary[(int)valueEnumerator.Current]);
+                        }
+                        else
+                            yield return null;
+                    }
                 }
             }
-
-            yield return null;
         }
 
-        IEnumerable<string> ReadDictionaryV2()
+        IEnumerable<object> ReadDictionaryV2(Type propertyType)
         {
             var present = ReadBooleanStream(Protocol.StreamKind.Present);
-            var data = ReadNumericStream(Protocol.StreamKind.Data, false);
-            var dictionaryData = ReadBinaryStream(Protocol.StreamKind.DictionaryData);
-            var length = ReadNumericStream(Protocol.StreamKind.Length, false);
+
+            var stripeStreamData = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Data);
+            var stripeStreamLength = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.Length);
+            var stripeStreamDictionary = _stripeStreams.FirstOrDefault(s => s.ColumnId == _subColumnIds[0] && s.StreamKind == Protocol.StreamKind.DictionaryData);
+
+            var stream = stripeStreamData.GetDecompressedStream();
+            var reader = new IntegerRunLengthEncodingV2Reader(stream, false);
+            var data = reader.Read().ToArray();
+
+            var streamDictionary = stripeStreamDictionary.GetDecompressedStream();
+            var memStream = new MemoryStream();
+            streamDictionary.CopyTo(memStream);
+            var dictionaryData = memStream.ToArray();
+
+            var streamLength = stripeStreamLength.GetDecompressedStream();
+            var readerLength = new IntegerRunLengthEncodingV2Reader(streamLength, false);
+            var length = readerLength.Read().ToArray();
+
             if (data == null || dictionaryData == null || length == null)
                 throw new InvalidDataException("DATA, DICTIONARY_DATA, and LENGTH streams must be available");
 
@@ -92,7 +165,7 @@ namespace ApacheOrcDotNet.ColumnTypes
             if (present == null)
             {
                 foreach (var value in data)
-                    yield return dictionary[(int)value];
+                    yield return CalculateValue(propertyType, dictionary[(int)value]);
             }
             else
             {
@@ -104,7 +177,7 @@ namespace ApacheOrcDotNet.ColumnTypes
                         var success = valueEnumerator.MoveNext();
                         if (!success)
                             throw new InvalidDataException("The PRESENT data stream's length didn't match the DATA stream's length");
-                        yield return dictionary[(int)valueEnumerator.Current];
+                        yield return CalculateValue(propertyType, dictionary[(int)valueEnumerator.Current]);
                     }
                     else
                         yield return null;
